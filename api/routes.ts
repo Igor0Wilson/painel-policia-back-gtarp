@@ -31,37 +31,63 @@ import {
 
 const router = Router();
 
-// Auto-seed default Colonel user
-async function seedDefaultUser() {
+// Auto-seed default Colonel user, dummy users, and mock punch logs
+async function seedAllData() {
   try {
-    const userRef = doc(db, "users", "1");
-    const userSnap = await getDoc(userRef);
-    if (!userSnap.exists()) {
-      const salt = await bcrypt.genSalt(10);
+    const salt = await bcrypt.genSalt(10);
+
+    // 1. Seed Coronel Comando (ID "1")
+    const user1Ref = doc(db, "users", "1");
+    const user1Snap = await getDoc(user1Ref);
+    if (!user1Snap.exists()) {
       const hashedPassword = await bcrypt.hash("admin123", salt);
-      await setDoc(userRef, {
+      await setDoc(user1Ref, {
         id: "1",
         name: "Coronel Comando",
         password: hashedPassword,
         role: "coronel",
         status: "active",
+        dutyStatus: "fora-de-servico",
         createdAt: new Date().toISOString()
       });
     }
-  } catch {
+
+    // 2. Seed other dummy users if they don't exist
+    const dummyUsers = [
+      { id: "123", name: "teste", role: "aluno", status: "active", dutyStatus: "fora-de-servico" }
+    ];
+
+    const defaultHashedPassword = await bcrypt.hash("militar123", salt);
+    const testeHashedPassword = await bcrypt.hash("teste", salt);
+
+    for (const u of dummyUsers) {
+      const uRef = doc(db, "users", u.id);
+      const uSnap = await getDoc(uRef);
+      if (!uSnap.exists()) {
+        await setDoc(uRef, {
+          ...u,
+          password: u.id === "123" ? testeHashedPassword : defaultHashedPassword,
+          createdAt: new Date().toISOString()
+        });
+      }
+    }
+  } catch (error) {
     // Seed failure is non-fatal
   }
 }
 
-seedDefaultUser();
+seedAllData();
 
 // Helper functions
+let ephemeralJwtSecret: string | null = null;
 function getJwtSecret(): string {
   if (process.env.JWT_SECRET) {
     return process.env.JWT_SECRET;
   }
-  // Fallback ephemeral secret — set JWT_SECRET env in production
-  return crypto.randomBytes(32).toString('hex');
+  if (!ephemeralJwtSecret) {
+    ephemeralJwtSecret = crypto.randomBytes(32).toString('hex');
+  }
+  return ephemeralJwtSecret;
 }
 
 // Permissions Fallback
@@ -97,6 +123,7 @@ export interface AuthRequest extends Request {
     role: string;
     status: string;
     isInstructor?: boolean;
+    dutyStatus?: string;
   };
 }
 
@@ -149,6 +176,7 @@ export async function authMiddleware(req: AuthRequest, res: Response, next: Next
     if (req.user) {
       req.user.role = userData.role;
       req.user.isInstructor = userData.isInstructor || false;
+      req.user.dutyStatus = userData.dutyStatus || "fora-de-servico";
     }
     next();
   } catch (err) {
@@ -218,6 +246,7 @@ router.post("/auth/register", async (req: Request, res: Response) => {
       status: initialStatus,
       isInstructor: false,
       courseTags: [],
+      dutyStatus: "fora-de-servico",
       createdAt: new Date().toISOString()
     };
 
@@ -290,7 +319,8 @@ router.post("/auth/login", async (req: Request, res: Response) => {
         isInstructor: user.isInstructor || false,
         courseTags: user.courseTags || [],
         avatarUrl: user.avatarUrl || null,
-        coverUrl: user.coverUrl || null
+        coverUrl: user.coverUrl || null,
+        dutyStatus: user.dutyStatus || "fora-de-servico"
       }
     });
   } catch (error) {
@@ -739,7 +769,7 @@ router.get("/announcements", authMiddleware, checkPermission("dashboard"), async
   try {
     const q = query(collection(db, "announcements"), orderBy("date", "desc"), limit(10));
     const querySnapshot = await getDocs(q);
-    const announcements = querySnapshot.docs.map(doc => doc.data());
+    const announcements = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     return res.json(announcements);
   } catch (error) {
     return res.status(500).json({ error: "Erro ao buscar avisos." });
@@ -754,6 +784,7 @@ router.post("/announcements", authMiddleware, checkPermission("users"), async (r
     await addDoc(collection(db, "announcements"), {
       title,
       content,
+      authorId: req.user!.id,
       authorName: req.user!.name,
       authorRole: req.user!.role,
       date: new Date().toISOString()
@@ -761,6 +792,30 @@ router.post("/announcements", authMiddleware, checkPermission("users"), async (r
     return res.json({ success: true, message: "Aviso publicado com sucesso!" });
   } catch (error) {
     return res.status(500).json({ error: "Erro ao publicar aviso." });
+  }
+});
+
+router.delete("/announcements/:id", authMiddleware, checkPermission("users"), async (req: AuthRequest, res: Response) => {
+  const { id } = req.params;
+  try {
+    const docRef = doc(db, "announcements", id);
+    const docSnap = await getDoc(docRef);
+    if (!docSnap.exists()) {
+      return res.status(404).json({ error: "Aviso não encontrado." });
+    }
+    
+    const data = docSnap.data();
+    const isAuthor = data.authorId === req.user!.id || data.authorName === req.user!.name;
+    const isColonel = req.user!.role === 'coronel';
+
+    if (!isAuthor && !isColonel) {
+      return res.status(403).json({ error: "Você não tem permissão para excluir este comunicado. Apenas o autor do aviso ou o Coronel podem excluí-lo." });
+    }
+
+    await deleteDoc(docRef);
+    return res.json({ success: true, message: "Aviso deletado com sucesso!" });
+  } catch (error) {
+    return res.status(500).json({ error: "Erro ao excluir aviso." });
   }
 });
 
@@ -1049,6 +1104,9 @@ router.get("/ptrs/active", authMiddleware, checkPermission("relatorios"), async 
 
 router.post("/ptrs/create", authMiddleware, checkPermission("relatorios"), async (req: AuthRequest, res: Response) => {
   const { chiefId, initialMembers, viaturaId, viaturaName } = req.body;
+  if (req.user!.dutyStatus === "fora-de-servico") {
+    return res.status(403).json({ error: "Você precisa bater o ponto de entrada para montar uma VTR." });
+  }
   if (!chiefId || !initialMembers || initialMembers.length === 0) {
     return res.status(400).json({ error: "Chefe e membros iniciais são obrigatórios." });
   }
@@ -1182,6 +1240,9 @@ router.post("/ptrs/:id/finish", authMiddleware, checkPermission("relatorios"), a
 router.post("/ptrs/:id/requests", authMiddleware, checkPermission("relatorios"), async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
   const { type } = req.body; 
+  if (type === "join" && req.user!.dutyStatus === "fora-de-servico") {
+    return res.status(403).json({ error: "Você precisa bater o ponto de entrada para participar de uma VTR." });
+  }
   
   try {
     const docRef = doc(db, "active_ptrs", id);
@@ -1329,6 +1390,9 @@ router.post("/ptrs/:id/add-member", authMiddleware, checkPermission("relatorios"
     const userSnap = await getDoc(userRef);
     if (!userSnap.exists()) return res.status(404).json({ error: "Usuário não encontrado." });
     const targetUser = userSnap.data();
+    if (targetUser.dutyStatus === "fora-de-servico") {
+      return res.status(400).json({ error: "Este oficial está fora de serviço e não pode ser adicionado." });
+    }
 
     const newMember = {
       userId: targetUser.id,
@@ -1391,6 +1455,9 @@ router.post("/ptrs/:id/remove-member", authMiddleware, checkPermission("relatori
 // --- Rota de Usuário "Aguardando PTR" ---
 router.post("/users/waiting-ptr", authMiddleware, async (req: AuthRequest, res: Response) => {
   const { isWaiting } = req.body;
+  if (isWaiting && req.user!.dutyStatus === "fora-de-servico") {
+    return res.status(403).json({ error: "Você precisa bater o ponto de entrada para ficar aguardando PTR." });
+  }
   try {
     const userRef = doc(db, "users", req.user!.id);
     await updateDoc(userRef, { isWaitingPtr: isWaiting });
@@ -1593,6 +1660,37 @@ router.get("/proxy/calculadora", async (req: Request, res: Response) => {
     }
 
     let html = await response.text();
+
+    // Inject custom CSS to make it full width and remove black borders/empty spaces
+    const styleToInject = `
+      <style>
+        body {
+          margin: 0 !important;
+          padding: 0 !important;
+          background-color: #0a0a0f !important;
+        }
+        .container, .container-fluid, .container-lg, .container-md, .container-sm, .container-xl, .container-xxl {
+          max-width: 100% !important;
+          width: 100% !important;
+          margin-left: 0 !important;
+          margin-right: 0 !important;
+          padding-left: 1rem !important;
+          padding-right: 1rem !important;
+        }
+        .main-layout {
+          max-width: 100% !important;
+          margin-left: 0 !important;
+          margin-right: 0 !important;
+          padding-top: 0.5rem !important;
+          padding-bottom: 0.5rem !important;
+        }
+        .main-header {
+          padding-top: 0.25rem !important;
+          padding-bottom: 0.25rem !important;
+        }
+      </style>
+    `;
+    html = html.replace('</head>', `${styleToInject}</head>`);
 
     // Rewrite relative paths in HTML to absolute paths pointing to burp.com.br/calculadora/
     html = html.replace(/href="assets\//g, 'href="https://burp.com.br/calculadora/assets/');
@@ -2086,6 +2184,340 @@ router.post("/chat/mute", authMiddleware, checkPermission("users"), async (req: 
     return res.json({ success: true, message: "Usuário silenciado com sucesso.", mutedUntil });
   } catch (error) {
     return res.status(500).json({ error: "Erro ao silenciar usuário." });
+  }
+});
+
+// --- RH Clock-in (Bate Ponto) Endpoints ---
+
+// Clock In
+router.post("/ponto/clock-in", authMiddleware, async (req: AuthRequest, res: Response) => {
+  if (!req.user) return res.status(401).json({ error: "Não autenticado." });
+  const userId = req.user.id;
+
+  try {
+    // Check if there is already an active punch for this user
+    const q = query(
+      collection(db, "punches"),
+      where("userId", "==", userId),
+      where("clockOut", "==", null)
+    );
+    const querySnap = await getDocs(q);
+    
+    if (!querySnap.empty) {
+      return res.status(400).json({ error: "Você já está em serviço. É necessário bater o ponto de saída primeiro." });
+    }
+
+    // Set user status to in-service
+    const userRef = doc(db, "users", userId);
+    await updateDoc(userRef, { dutyStatus: "em-servico" });
+
+    // Create punch log
+    await addDoc(collection(db, "punches"), {
+      userId,
+      userName: req.user.name,
+      userRole: req.user.role,
+      clockIn: new Date().toISOString(),
+      clockOut: null,
+      anomaly: false,
+      anomalyType: null,
+      durationHours: 0
+    });
+
+    return res.json({ success: true, message: "Ponto de entrada registrado. Bom serviço!" });
+  } catch (error) {
+    return res.status(500).json({ error: "Erro ao registrar ponto de entrada." });
+  }
+});
+
+// Clock Out
+router.post("/ponto/clock-out", authMiddleware, async (req: AuthRequest, res: Response) => {
+  if (!req.user) return res.status(401).json({ error: "Não autenticado." });
+  const userId = req.user.id;
+  const nowStr = new Date().toISOString();
+
+  try {
+    // Set user status to out-of-service
+    const userRef = doc(db, "users", userId);
+    await updateDoc(userRef, { dutyStatus: "fora-de-servico" });
+
+    // Find active punch
+    const q = query(
+      collection(db, "punches"),
+      where("userId", "==", userId),
+      where("clockOut", "==", null)
+    );
+    const querySnap = await getDocs(q);
+
+    if (querySnap.empty) {
+      // Anomaly: Clock-out without clock-in
+      await addDoc(collection(db, "punches"), {
+        userId,
+        userName: req.user.name,
+        userRole: req.user.role,
+        clockIn: null,
+        clockOut: nowStr,
+        anomaly: true,
+        anomalyType: "missing_clock_in",
+        durationHours: 0
+      });
+      return res.json({ 
+        success: true, 
+        message: "Ponto de saída registrado com anomalia (sem registro de entrada correspondente).",
+        anomaly: true 
+      });
+    }
+
+    // Update active punch
+    const punchDoc = querySnap.docs[0];
+    const punchRef = doc(db, "punches", punchDoc.id);
+    const punchData = punchDoc.data();
+    
+    const clockInTime = new Date(punchData.clockIn).getTime();
+    const clockOutTime = new Date(nowStr).getTime();
+    const durationHours = Math.max(0, (clockOutTime - clockInTime) / (1000 * 60 * 60));
+
+    const isLongDuration = durationHours > 12; // Shifts longer than 12h are anomalous
+
+    await updateDoc(punchRef, {
+      clockOut: nowStr,
+      durationHours: Number(durationHours.toFixed(2)),
+      anomaly: isLongDuration,
+      anomalyType: isLongDuration ? "long_duration" : null
+    });
+
+    return res.json({ 
+      success: true, 
+      message: "Ponto de saída registrado com sucesso.",
+      durationHours: Number(durationHours.toFixed(2))
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Erro ao registrar ponto de saída." });
+  }
+});
+
+// Get My Punch Logs
+router.get("/ponto/my-logs", authMiddleware, async (req: AuthRequest, res: Response) => {
+  if (!req.user) return res.status(401).json({ error: "Não autenticado." });
+  const userId = req.user.id;
+
+  try {
+    const q = query(
+      collection(db, "punches"),
+      where("userId", "==", userId),
+      orderBy("clockIn", "desc")
+    );
+    const querySnap = await getDocs(q);
+    const logs = querySnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    
+    // Sort logic because local db or firestore might not have composite indices built
+    logs.sort((a: any, b: any) => {
+      const timeA = a.clockIn ? new Date(a.clockIn).getTime() : new Date(a.clockOut).getTime();
+      const timeB = b.clockIn ? new Date(b.clockIn).getTime() : new Date(b.clockOut).getTime();
+      return timeB - timeA;
+    });
+
+    return res.json(logs);
+  } catch (error) {
+    return res.status(500).json({ error: "Erro ao buscar histórico de pontos." });
+  }
+});
+
+// Admin Dashboard - Clock-in Control
+router.get("/ponto/admin/dashboard", authMiddleware, checkPermission("users"), async (req: AuthRequest, res: Response) => {
+  try {
+    // Fetch all users
+    const usersSnap = await getDocs(collection(db, "users"));
+    const usersList = usersSnap.docs.map(doc => doc.data());
+
+    // Fetch all punches
+    const punchesSnap = await getDocs(collection(db, "punches"));
+    const punchesList = punchesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    const nowTime = Date.now();
+    const twelveHoursMs = 12 * 60 * 60 * 1000;
+
+    // Process user performance and state
+    const userStatsMap: Record<string, { id: string; name: string; role: string; dutyStatus: string; totalHours: number }> = {};
+    
+    // Initialize stats map for all active users
+    usersList.forEach(u => {
+      if (u.status === "active") {
+        userStatsMap[u.id] = {
+          id: u.id,
+          name: u.name,
+          role: u.role,
+          dutyStatus: u.dutyStatus || "fora-de-servico",
+          totalHours: 0
+        };
+      }
+    });
+
+    const anomalies: any[] = [];
+
+    punchesList.forEach(p => {
+      // 1. Calculate closed punch hours
+      if (p.clockIn && p.clockOut) {
+        if (userStatsMap[p.userId]) {
+          userStatsMap[p.userId].totalHours += p.durationHours || 0;
+        }
+        // If it was marked as long duration, add to anomalies
+        if (p.anomaly || p.anomalyType === "long_duration") {
+          anomalies.push({
+            id: p.id,
+            userId: p.userId,
+            userName: p.userName,
+            userRole: p.userRole,
+            type: "long_duration",
+            description: `Escala excessiva (${p.durationHours} horas)`,
+            clockIn: p.clockIn,
+            clockOut: p.clockOut
+          });
+        }
+      }
+
+      // 2. Identify active open shift anomaly (> 12h running)
+      if (p.clockIn && !p.clockOut) {
+        const timeDiff = nowTime - new Date(p.clockIn).getTime();
+        if (timeDiff > twelveHoursMs) {
+          anomalies.push({
+            id: p.id,
+            userId: p.userId,
+            userName: p.userName,
+            userRole: p.userRole,
+            type: "open_shift_long",
+            description: `Serviço aberto sem saída (${(timeDiff / (1000 * 60 * 60)).toFixed(1)}h correndo)`,
+            clockIn: p.clockIn,
+            clockOut: null
+          });
+        }
+      }
+
+      // 3. Identify missing clock-in anomaly
+      if (!p.clockIn && p.clockOut) {
+        anomalies.push({
+          id: p.id,
+          userId: p.userId,
+          userName: p.userName,
+          userRole: p.userRole,
+          type: "missing_clock_in",
+          description: "Saída registrada sem entrada correspondente",
+          clockIn: null,
+          clockOut: p.clockOut
+        });
+      }
+    });
+
+    // Round total hours
+    const userStats = Object.values(userStatsMap).map(u => ({
+      ...u,
+      totalHours: Number(u.totalHours.toFixed(2))
+    }));
+
+    // Sort by hours
+    userStats.sort((a, b) => b.totalHours - a.totalHours);
+
+    // Calculate High & Low Performance lists
+    const highPerformance = userStats.slice(0, 5).filter(u => u.totalHours > 0);
+    // Low performance (bottom 5, reverse order so lowest shows first)
+    const lowPerformance = [...userStats].reverse().slice(0, 5);
+
+    // Best and Worst performing cards
+    const bestPerformer = userStats.length > 0 && userStats[0].totalHours > 0 ? userStats[0] : null;
+    const worstPerformer = userStats.length > 0 ? userStats[userStats.length - 1] : null;
+
+    // Chart Data calculations:
+    let activeInService = 0;
+    let inactiveOutOfService = 0;
+    userStats.forEach(u => {
+      if (u.dutyStatus === "em-servico") {
+        activeInService++;
+      } else {
+        inactiveOutOfService++;
+      }
+    });
+
+    // Group and sort hours by rank hierarchy in the correct order
+    function getRankGroupKey(role: string): string {
+      const r = role.toLowerCase();
+      if (r === "aluno" || r === "soldado-2" || r === "2-soldado") return "aluno";
+      if (r === "soldado" || r === "soldado-1" || r === "1-soldado") return "soldado";
+      if (r === "cabo") return "cabo";
+      if (r === "3-sargento") return "3-sargento";
+      if (r === "2-sargento") return "2-sargento";
+      if (r === "1-sargento") return "1-sargento";
+      if (r === "subtenente") return "subtenente";
+      if (r === "aspirante") return "aspirante";
+      if (r === "2-tenente") return "2-tenente";
+      if (r === "1-tenente" || r === "tenente") return "1-tenente";
+      if (r === "capitao") return "capitao";
+      if (r === "major") return "major";
+      if (r === "tenente-coronel") return "tenente-coronel";
+      if (r === "coronel") return "coronel";
+      return r;
+    }
+
+    const rankHoursMap: Record<string, number> = {
+      aluno: 0,
+      soldado: 0,
+      cabo: 0,
+      "3-sargento": 0,
+      "2-sargento": 0,
+      "1-sargento": 0,
+      subtenente: 0,
+      aspirante: 0,
+      "2-tenente": 0,
+      "1-tenente": 0,
+      capitao: 0,
+      major: 0,
+      "tenente-coronel": 0,
+      coronel: 0
+    };
+
+    userStats.forEach(u => {
+      const groupKey = getRankGroupKey(u.role);
+      if (rankHoursMap[groupKey] !== undefined) {
+        rankHoursMap[groupKey] += u.totalHours;
+      }
+    });
+
+    const barChartData = [
+      { name: "Sd. 2ª Cl.", hours: Number(rankHoursMap.aluno.toFixed(2)) },
+      { name: "Sd. 1ª Cl.", hours: Number(rankHoursMap.soldado.toFixed(2)) },
+      { name: "Cabo", hours: Number(rankHoursMap.cabo.toFixed(2)) },
+      { name: "3º Sgt", hours: Number(rankHoursMap["3-sargento"].toFixed(2)) },
+      { name: "2º Sgt", hours: Number(rankHoursMap["2-sargento"].toFixed(2)) },
+      { name: "1º Sgt", hours: Number(rankHoursMap["1-sargento"].toFixed(2)) },
+      { name: "Subten.", hours: Number(rankHoursMap.subtenente.toFixed(2)) },
+      { name: "Asp.", hours: Number(rankHoursMap.aspirante.toFixed(2)) },
+      { name: "2º Ten.", hours: Number(rankHoursMap["2-tenente"].toFixed(2)) },
+      { name: "1º Ten.", hours: Number(rankHoursMap["1-tenente"].toFixed(2)) },
+      { name: "Cap.", hours: Number(rankHoursMap.capitao.toFixed(2)) },
+      { name: "Maj.", hours: Number(rankHoursMap.major.toFixed(2)) },
+      { name: "Ten. Cel.", hours: Number(rankHoursMap["tenente-coronel"].toFixed(2)) },
+      { name: "Cel.", hours: Number(rankHoursMap.coronel.toFixed(2)) }
+    ];
+
+    return res.json({
+      summary: {
+        totalActiveDuty: activeInService,
+        totalOutOfDuty: inactiveOutOfService,
+        totalAnomalies: anomalies.length
+      },
+      bestPerformer,
+      worstPerformer,
+      highPerformance,
+      lowPerformance,
+      anomalies,
+      charts: {
+        pieData: [
+          { name: "Em Serviço", value: activeInService },
+          { name: "Fora de Serviço", value: inactiveOutOfService }
+        ],
+        barData: barChartData
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Erro ao compilar relatório do dashboard de RH." });
   }
 });
 

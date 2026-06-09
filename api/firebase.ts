@@ -44,7 +44,11 @@ if (!useLocalDb) {
 // -------------------------------------------------------------
 // LOCAL DB IMPLEMENTATION (only used when USE_LOCAL_DB=true)
 // -------------------------------------------------------------
-const dbPath = process.env.VERCEL ? "/tmp/db.json" : path.resolve(process.cwd(), "db.json");
+const dbPath = process.env.VERCEL 
+  ? "/tmp/db.json" 
+  : (fs.existsSync(path.resolve(__dirname, "..", "..", "db.json"))
+      ? path.resolve(__dirname, "..", "..", "db.json")
+      : path.resolve(process.cwd(), "db.json"));
 
 function readDb() {
   if (!fs.existsSync(dbPath)) {
