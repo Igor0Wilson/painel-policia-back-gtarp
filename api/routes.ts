@@ -79,15 +79,14 @@ async function seedAllData() {
 seedAllData();
 
 // Helper functions
-let ephemeralJwtSecret: string | null = null;
 function getJwtSecret(): string {
   if (process.env.JWT_SECRET) {
     return process.env.JWT_SECRET;
   }
-  if (!ephemeralJwtSecret) {
-    ephemeralJwtSecret = crypto.randomBytes(32).toString('hex');
+  if (process.env.NODE_ENV === "production" || process.env.VERCEL) {
+    console.warn("WARNING: JWT_SECRET environment variable is not defined! Using fallback key. This is insecure for production.");
   }
-  return ephemeralJwtSecret;
+  return "super_secret_jwt_key_123!@#";
 }
 
 // Permissions Fallback

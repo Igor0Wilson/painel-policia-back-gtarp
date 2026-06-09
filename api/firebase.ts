@@ -26,16 +26,22 @@ if (!useLocalDb) {
 
     if (!firebaseConfig.apiKey || !firebaseConfig.projectId) {
       throw new Error(
-        "Credenciais do Firebase ausentes nas variáveis de ambiente."
+        "Credenciais do Firebase ausentes nas variáveis de ambiente (FIREBASE_API_KEY e FIREBASE_PROJECT_ID)."
       );
     }
 
     firebaseApp =
       getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
     db = firestore.getFirestore(firebaseApp);
-  } catch {
-    isLocalActive = true;
-    db = { type: "local" };
+  } catch (error: any) {
+    console.error("Erro na inicialização do Firebase:", error.message || error);
+    if (process.env.VERCEL || process.env.NODE_ENV === "production") {
+      isLocalActive = false;
+      db = { type: "firestore-error", error: error.message || error };
+    } else {
+      isLocalActive = true;
+      db = { type: "local" };
+    }
   }
 } else {
   db = { type: "local" };
@@ -165,6 +171,9 @@ export function doc(dbInstance: any, collectionName: string, id?: string) {
     }
     return new LocalDocRef(collectionName, id || "");
   }
+  if (dbInstance && dbInstance.type === "firestore-error") {
+    throw new Error(`Firestore initialization failed: ${dbInstance.error}`);
+  }
   return firestore.doc(dbInstance, collectionName, id!);
 }
 
@@ -217,10 +226,13 @@ export async function getDoc(docRef: any) {
   }
   try {
     return await firestore.getDoc(docRef);
-  } catch {
-    // Any Firestore error — fall back to local DB
-    isLocalActive = true;
-    return getDoc(docRef);
+  } catch (error: any) {
+    console.error("Firestore getDoc error:", error);
+    if (useLocalDb) {
+      isLocalActive = true;
+      return getDoc(docRef);
+    }
+    throw error;
   }
 }
 
@@ -235,9 +247,13 @@ export async function setDoc(docRef: any, data: any) {
   }
   try {
     return await firestore.setDoc(docRef, data);
-  } catch {
-    isLocalActive = true;
-    return setDoc(docRef, data);
+  } catch (error: any) {
+    console.error("Firestore setDoc error:", error);
+    if (useLocalDb) {
+      isLocalActive = true;
+      return setDoc(docRef, data);
+    }
+    throw error;
   }
 }
 
@@ -253,9 +269,13 @@ export async function updateDoc(docRef: any, data: any) {
   }
   try {
     return await firestore.updateDoc(docRef, data);
-  } catch {
-    isLocalActive = true;
-    return updateDoc(docRef, data);
+  } catch (error: any) {
+    console.error("Firestore updateDoc error:", error);
+    if (useLocalDb) {
+      isLocalActive = true;
+      return updateDoc(docRef, data);
+    }
+    throw error;
   }
 }
 
@@ -271,9 +291,13 @@ export async function addDoc(collectionRef: any, data: any) {
   }
   try {
     return await firestore.addDoc(collectionRef, data);
-  } catch {
-    isLocalActive = true;
-    return addDoc(collectionRef, data);
+  } catch (error: any) {
+    console.error("Firestore addDoc error:", error);
+    if (useLocalDb) {
+      isLocalActive = true;
+      return addDoc(collectionRef, data);
+    }
+    throw error;
   }
 }
 
@@ -289,9 +313,13 @@ export async function deleteDoc(docRef: any) {
   }
   try {
     return await firestore.deleteDoc(docRef);
-  } catch {
-    isLocalActive = true;
-    return deleteDoc(docRef);
+  } catch (error: any) {
+    console.error("Firestore deleteDoc error:", error);
+    if (useLocalDb) {
+      isLocalActive = true;
+      return deleteDoc(docRef);
+    }
+    throw error;
   }
 }
 
@@ -357,8 +385,12 @@ export async function getDocs(queryOrCollection: any) {
   }
   try {
     return await firestore.getDocs(queryOrCollection);
-  } catch {
-    isLocalActive = true;
-    return getDocs(queryOrCollection);
+  } catch (error: any) {
+    console.error("Firestore getDocs error:", error);
+    if (useLocalDb) {
+      isLocalActive = true;
+      return getDocs(queryOrCollection);
+    }
+    throw error;
   }
 }
