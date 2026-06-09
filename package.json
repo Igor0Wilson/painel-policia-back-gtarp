@@ -5,8 +5,7 @@
   "main": "api/index.ts",
   "scripts": {
     "dev": "tsx watch api/index.ts",
-    "start": "tsx api/index.ts",
-    "build": "echo Backend pronto"
+    "start": "tsx api/index.ts"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
