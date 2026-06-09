@@ -275,8 +275,8 @@ router.post("/auth/login", async (req: Request, res: Response) => {
     // Set cookie
     res.cookie("token", token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
+      secure: true, // Sempre secure para cross-origin
+      sameSite: "none",
       maxAge: 8 * 60 * 60 * 1000 // 8 hours
     });
 
@@ -300,7 +300,11 @@ router.post("/auth/login", async (req: Request, res: Response) => {
 
 // Logout
 router.post("/auth/logout", (req: Request, res: Response) => {
-  res.clearCookie("token");
+  res.clearCookie("token", {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+  });
   return res.json({ success: true, message: "Sessão encerrada com sucesso." });
 });
 
